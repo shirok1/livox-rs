@@ -1,10 +1,9 @@
-use std::cmp::max;
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 use byte_struct::*;
 use bytes::{Buf, BufMut, BytesMut};
 use crc::{Algorithm, Crc};
-use nalgebra::{Matrix, OMatrix, Point3, RowVector3, SMatrix, Vector3, Vector4};
+use nalgebra::{Point3, SMatrix, Vector4};
 
 use tracing::{debug, warn};
 use crate::model::ParseError::{InvalidCommandType, InvalidCrc16, InvalidCrc32, InvalidData, InvalidLength, InvalidSOF, InvalidVersion, WrongPointCloudSize};
@@ -146,10 +145,6 @@ pub enum FrameData {
     // MSG,
 }
 
-
-mod parsing;
-
-mod command;
 pub mod data_type;
 
 #[derive(PartialEq, Debug)]

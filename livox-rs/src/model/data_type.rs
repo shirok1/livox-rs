@@ -35,10 +35,10 @@ bitfields!(
     pub HubStatusCode: u32 {
         sync_status: 2,
         temp_status: 2,
-        LiDAR_status: 1,
-        LiDAR_link_status: 1,
+        lidar_status: 1,
+        lidar_link_status: 1,
         firmware_status: 1,
-        RSVD: 23,
+        reserved: 23,
         system_status: 2,
     }
 );

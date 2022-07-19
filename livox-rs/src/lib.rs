@@ -1,23 +1,26 @@
+use std::time::Duration;
 use std::error::Error;
 use std::net::Ipv4Addr;
-use tokio::net::UdpSocket;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
-use std::time::Duration;
+use async_stream::try_stream;
+use nalgebra::SMatrix;
 use tokio::{select, spawn};
-use tokio::sync::mpsc::Receiver;
+use tokio::net::UdpSocket;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::interval;
-use tracing::{error, info, info_span, instrument, Instrument, Span, trace, warn};
+use tracing::{error, info, info_span, instrument, Instrument, warn};
+
 use crate::LivoxError::{BadResponse, ParseError};
 use crate::model::{Acknowledge, Command, ControlFrame, FrameData};
 use crate::model::data_type::*;
-// use crate::model::data_type::prelude::*;
 use crate::model::FrameData::{AckMsgFrame, CmdFrame};
 use crate::result_util::ToLivoxResult;
 
+
 pub mod model;
+
 #[cfg(test)]
 mod test;
 
@@ -62,13 +65,13 @@ impl Error for LivoxError {
 
 pub type LivoxResult<T> = Result<T, LivoxError>;
 
+mod result_util;
+
 #[derive(Debug)]
 pub struct AsyncCommandTask {
     command: Command,
     callback: oneshot::Sender<LivoxResult<Acknowledge>>,
 }
-
-mod result_util;
 
 impl Livox {
     pub const BROADCAST_LISTEN_PORT: u16 = 55000;
@@ -98,12 +101,23 @@ impl Livox {
             } else { Err(NoneBroadcastReceived)? }
         };
 
+        match std::str::from_utf8(&broadcast_code[..broadcast_code.len() - 1]) {
+            Ok(str_code) => info!("LiDAR broadcast code: {}", str_code),
+            Err(err) => warn!("Error parsing broadcast code {:?}: {}", broadcast_code, err),
+        }
+
         Ok(Livox {
             lidar_addr,
             broadcast_code,
             device_type: match dev_type {
-                x if x == (DeviceType::Mid70 as u8) => DeviceType::Mid70,
-                _ => DeviceType::NotImplemented,
+                x if x == (DeviceType::Mid70 as u8) => {
+                    info!("Yes, it is a Mid-70 (dev_type: 7)");
+                    DeviceType::Mid70
+                }
+                _ => {
+                    warn!("Unknown device type ({})!", dev_type);
+                    DeviceType::NotImplemented
+                }
             },
         })
     }
@@ -176,17 +190,14 @@ pub struct LivoxClient {
 impl LivoxClient {
     const HEARTBEAT_PERIOD: Duration = Duration::from_millis(750);
 
-    pub fn get_ds(&self) -> Arc<UdpSocket> {
-        self.data_socket.clone()
-    }
-
     async fn send_command_to_channel(channel: &mpsc::Sender<AsyncCommandTask>, command: Command) -> LivoxResult<Acknowledge> {
         let (callback, task) = oneshot::channel::<LivoxResult<Acknowledge>>();
         channel.send(AsyncCommandTask { command, callback }).await
             .err_reason("While sending command")?;
         task.await.err_reason("While waiting for command response")?
     }
-    fn spawn_task_thread(command_socket: UdpSocket, mut task_receiver: Receiver<AsyncCommandTask>) -> JoinHandle<()> {
+
+    fn spawn_task_thread(command_socket: UdpSocket, mut task_receiver: mpsc::Receiver<AsyncCommandTask>) -> JoinHandle<()> {
         spawn(async move {
             let mut seq_num = 0;
             let mut buf = [0u8; 1024];
@@ -302,6 +313,23 @@ impl LivoxClient {
             Acknowledge::General(AckGeneral::StartStopSampling { ret_code: 0 }) => Ok(()),
             ack if matches!(ack, Acknowledge::General(AckGeneral::StartStopSampling { .. })) => Err(AckFailed(ack)),
             any => Err(AckWrong(any)),
+        }
+    }
+
+    pub fn get_ds(&self) -> Arc<UdpSocket> {
+        self.data_socket.clone()
+    }
+
+    pub fn matrix_stream(&self) -> impl tokio_stream::Stream<Item=LivoxResult<SMatrix<f32, 4, 96>>> {
+        use model::PointCloudFrame;
+
+        let socket = self.data_socket.clone();
+        let mut buf = [0u8; 2048];
+
+        try_stream! {
+            while let size = socket.recv(&mut buf).await.err_reason("While reading point cloud frame")? {
+                yield PointCloudFrame::parse_augmented_matrix(&buf[..size]);
+            }
         }
     }
 }
