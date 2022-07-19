@@ -251,7 +251,7 @@ impl PointCloudFrame {
             i32::read_bytes_default_le(&d[8..12]) as f32)).collect::<Vec<_>>();
         SMatrix::<f32, 3, 96>::from_columns(vec.as_slice())
     }*/
-    pub fn parse_augmented_matrix(frame: &[u8]) -> SMatrix::<f32, 4, 96> {
+    pub fn parse_homogeneous_matrix(frame: &[u8]) -> SMatrix::<f32, 4, 96> {
         assert_eq!(frame[9], 0x02);
         let vec = frame[18..].chunks(DT2::BYTE_LEN).map(|d| Vector4::new(
             i32::read_bytes_default_le(&d[0..4]) as f32,

@@ -24,20 +24,29 @@ pub mod model;
 #[cfg(test)]
 mod test;
 
+/// Represents a Livox device.
+/// See [Livox SDK Communication Protocol](https://github.com/Livox-SDK/Livox-SDK/wiki/Livox-SDK-Communication-Protocol#0x00-broadcast-message) for more information.
 #[derive(Debug)]
 pub struct Livox {
-    lidar_addr: SocketAddr,
-    broadcast_code: [u8; 16],
-    device_type: DeviceType,
+    /// UDP socket address of the Livox device for commands, port should always be 65000.
+    /// (Note: Data transmissions are not from the same socket port as the command transmission.)
+    pub lidar_addr: SocketAddr,
+    /// Device broadcast code, 15 capital letters or digits with a trailing '\0'
+    pub broadcast_code: [u8; 16],
+    /// Device type
+    pub device_type: DeviceType,
 }
 
+/// Livox device type.
 #[derive(Debug)]
 #[repr(u8)]
 pub enum DeviceType {
+    /// Livox Mid-70 (0x06)
     Mid70 = 6,
     NotImplemented = 255,
 }
 
+/// Error types in [`Livox`] and [`LivoxClient`].
 #[derive(Debug)]
 pub enum LivoxError {
     IoError(&'static str, std::io::Error),
@@ -67,6 +76,7 @@ pub type LivoxResult<T> = Result<T, LivoxError>;
 
 mod result_util;
 
+/// A asynchronous Livox command task.
 #[derive(Debug)]
 pub struct AsyncCommandTask {
     command: Command,
@@ -74,8 +84,12 @@ pub struct AsyncCommandTask {
 }
 
 impl Livox {
+    /// The port host should listen on for broadcast.
     pub const BROADCAST_LISTEN_PORT: u16 = 55000;
 
+    /// Find a Livox device by listening on UDP port 55000.
+    /// Follow steps described in
+    /// [Livox SDK Communication Protocol](https://github.com/Livox-SDK/Livox-SDK/wiki/Livox-SDK-Communication-Protocol#23-sdk-connection).
     #[instrument]
     pub async fn wait_for_one() -> LivoxResult<Self> {
         use LivoxError::*;
@@ -122,6 +136,8 @@ impl Livox {
         })
     }
 
+    /// Try to send handshake message to this Livox device.
+    /// Returns a [`LivoxClient`] if handshake succeeded.
     #[instrument(skip(self, user_ip, cmd_port, data_port), fields(lidar = % self.lidar_addr))]
     pub async fn handshake(self, user_ip: Ipv4Addr, cmd_port: u16, data_port: u16) -> LivoxResult<LivoxClient> {
         use LivoxError::*;
@@ -177,9 +193,12 @@ impl Livox {
     }
 }
 
+/// A client of a Livox LiDAR.
+/// Should only be created with [`Livox::handshake`].
 #[derive(Debug)]
 pub struct LivoxClient {
-    lidar: Livox,
+    /// The LiDAR this client is connected to.
+    pub lidar: Livox,
     task_channel: mpsc::Sender<AsyncCommandTask>,
     task_thread: JoinHandle<()>,
     heartbeat_stop: oneshot::Sender<()>,
@@ -297,10 +316,14 @@ impl LivoxClient {
         }.instrument(info_span!("heartbeat")))
     }
 
+    /// Send a command to the LiDAR.
+    /// See [`CmdGeneral`] and [`CmdLiDAR`] for available commands.
     pub async fn send_command(&self, command: Command) -> LivoxResult<Acknowledge> {
         Self::send_command_to_channel(&self.task_channel, command).await
     }
 
+    /// Start or stop sampling.
+    /// [Protocol Definition](https://github.com/Livox-SDK/Livox-SDK/wiki/Livox-SDK-Communication-Protocol#0x04-startstop-sampling)
     #[instrument]
     pub async fn set_sampling(&self, start: bool) -> Result<(), LivoxError> {
         use LivoxError::*;
@@ -316,11 +339,9 @@ impl LivoxClient {
         }
     }
 
-    pub fn get_ds(&self) -> Arc<UdpSocket> {
-        self.data_socket.clone()
-    }
-
-    pub fn matrix_stream(&self) -> impl tokio_stream::Stream<Item=LivoxResult<SMatrix<f32, 4, 96>>> {
+    /// Get a async stream of homogeneous matrix of LiDAR data.
+    /// Each point is presented by a `Vector4<f32>`, with `1` as its 4th component.
+    pub fn homogeneous_matrix_stream(&self) -> impl tokio_stream::Stream<Item=LivoxResult<SMatrix<f32, 4, 96>>> {
         use model::PointCloudFrame;
 
         let socket = self.data_socket.clone();
@@ -328,7 +349,7 @@ impl LivoxClient {
 
         try_stream! {
             while let size = socket.recv(&mut buf).await.err_reason("While reading point cloud frame")? {
-                yield PointCloudFrame::parse_augmented_matrix(&buf[..size]);
+                yield PointCloudFrame::parse_homogeneous_matrix(&buf[..size]);
             }
         }
     }

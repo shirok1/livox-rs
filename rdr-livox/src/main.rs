@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut img_server = EncodedImgServer::new(DEPTH_GRAPH_SERVER_ENDPOINT).await;
 
-    let pc_stream = client.matrix_stream();
+    let pc_stream = client.homogeneous_matrix_stream();
     tokio::pin!(pc_stream);
 
     let mut img = image::GrayImage::new(3072, 2048);
