@@ -1,0 +1,3 @@
+[workspace]
+
+members = ["livox-rs", "livox-rs-proc", "rdr-livox"]
