@@ -9,7 +9,9 @@ use tokio::{time};
 use tokio_stream::StreamExt;
 use tracing::{info, warn};
 
-use rdr_zeromq::server::EncodedImgServer;
+use rdr_zeromq::prelude::Timestamp;
+use rdr_zeromq::prelude::lidar::{LiDARFilteredPoints, LiDARPoint};
+use rdr_zeromq::server::{EncodedImgServer, LiDARServer};
 use rdr_zeromq::traits::Server;
 use livox_rs::Livox;
 
@@ -18,6 +20,7 @@ const COMMAND_SOCKET_PORT: u16 = 1157;
 const DATA_LISTEN_PORT: u16 = 7731;
 
 const DEPTH_GRAPH_SERVER_ENDPOINT: &str = "tcp://0.0.0.0:8100";
+const POINT_CLOUD_SERVER_ENDPOINT: &str = "tcp://0.0.0.0:8200";
 
 #[tokio::main]
 #[tracing::instrument]
@@ -27,6 +30,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let client = Livox::wait_for_one().await?
         .handshake(Ipv4Addr::new(192, 168, 1, 50), COMMAND_SOCKET_PORT, DATA_LISTEN_PORT).await?;
     client.set_sampling(true).await?;
+
+    let calib_mat = calculate_calib_mat();
+
+
+    let mut pc_server = LiDARServer::new(POINT_CLOUD_SERVER_ENDPOINT).await;
+
 
     let mut img_server = EncodedImgServer::new(DEPTH_GRAPH_SERVER_ENDPOINT).await;
 
@@ -39,7 +48,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut count = 0;
 
-    let calib_mat = calculate_calib_mat();
 
     while let Some(pc) = pc_stream.next().await {
         match pc {
@@ -47,27 +55,43 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Ok(pc) => {
                 let not_unified_pixel_with_depth = calib_mat * pc;
 
-                let points = not_unified_pixel_with_depth.column_iter().map(|p| Vector3::new(p.x / p.z, p.y / p.z, p.z)).filter(|p| {
-                    0.0 < p.x && p.x < 3072.0 && 0.0 < p.y && p.y < 2048.0
+                let points = not_unified_pixel_with_depth.column_iter().map(|p| ((p.x / p.z) as i16, (p.y / p.z) as i16, p.z)).filter(|(x, y, _)| {
+                    0 <= *x && *x < 3072 && 0 < *y && *y < 2048
                 }).collect::<Vec<_>>();
 
-                // let i = points.len();
-                draw_points(&mut img, points.as_ref());
-                draw_points(&mut backup_img, points.as_ref());
-                // info!("{} pixels in range, used time {}ms", i, start_time.elapsed().as_millis());
+                // Send points
+                {
+                    let mut msg = LiDARFilteredPoints::new();
+                    msg.timestamp = Some(Timestamp::now()).into();
+                    msg.points = points.iter().map(|(x, y, z)| {
+                        let mut point = LiDARPoint::new();
+                        point.x = *x as i32;
+                        point.y = *y as i32;
+                        point.z = *z;
+                        point
+                    }).collect();
+                    pc_server.send(&msg).await?;
+                }
 
+                // Draw depth graph
+                {
+                    // let i = points.len();
+                    draw_points(&mut img, points.as_ref());
+                    draw_points(&mut backup_img, points.as_ref());
+                    // info!("{} pixels in range, used time {}ms", i, start_time.elapsed().as_millis());
 
-                count += 1;
-                if count == 1000 {
-                    count = 0;
-                    let start_time = time::Instant::now();
-                    img.write_to(&mut Cursor::new(&mut img_bytes), image::ImageOutputFormat::Bmp)?;
-                    info!("Bitmap size: {}kb, encoding used {}ms", img_bytes.len() / 1024, start_time.elapsed().as_millis());
-                    let start_time = time::Instant::now();
-                    img_server.send_img(Bytes::copy_from_slice(&img_bytes[..])).await?;
-                    info!("Send image used time {}ms", start_time.elapsed().as_millis());
-                    img.fill(0);
-                    swap(&mut img, &mut backup_img);
+                    count += 1;
+                    if count == 1000 {
+                        count = 0;
+                        let start_time = time::Instant::now();
+                        img.write_to(&mut Cursor::new(&mut img_bytes), image::ImageOutputFormat::Bmp)?;
+                        info!("Bitmap size: {}kb, encoding used {}ms", img_bytes.len() / 1024, start_time.elapsed().as_millis());
+                        let start_time = time::Instant::now();
+                        img_server.send_img(Bytes::copy_from_slice(&img_bytes[..])).await?;
+                        info!("Send image used time {}ms", start_time.elapsed().as_millis());
+                        img.fill(0);
+                        swap(&mut img, &mut backup_img);
+                    }
                 }
             }
         }
@@ -75,18 +99,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn draw_points(img: &mut ImageBuffer<Luma<u8>, Vec<u8>>, points: &[Vector3<f32>]) {
-    for p in points {
-        let x = p.x;
-        let y = p.y;
-        let luma = p.z / 100.0;
-        img.put_pixel(x as u32, y as u32, Luma([luma as u8]));
+fn draw_points(img: &mut ImageBuffer<Luma<u8>, Vec<u8>>, points: &[(i16, i16, f32)]) {
+    for (x, y, z) in points {
+        let luma = z / 100.0;
+        img.put_pixel(*x as u32, *y as u32, Luma([luma as u8]));
 
-        for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)].iter() {
-            let x1 = (x + dx) as u32;
-            let y1 = (y + dy) as u32;
-            if x1 >= 3072 || y1 >= 2048 { continue; }
-            let old_luma = &mut img.get_pixel_mut(x1, y1).0;
+        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)].iter() {
+            let x1 = x + dx;
+            let y1 = y + dy;
+            if 0 < x1 || x1 >= 3072 || 0 < y1 || y1 >= 2048 { continue; }
+            let old_luma = &mut img.get_pixel_mut(x1 as u32, y1 as u32).0;
             old_luma[0] = ((old_luma[0] as f32 + luma) / 2.0) as u8;
         }
     }

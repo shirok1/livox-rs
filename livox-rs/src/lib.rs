@@ -227,67 +227,42 @@ impl LivoxClient {
                     data: CmdFrame(command),
                     seq_num,
                 };
-                let sent_size = match command_socket.send(frame.serialize().as_ref())
+
+                let callback = |result: LivoxResult<Acknowledge>| {
+                    if let Err(data) = callback.send(result) {
+                        error!("Synchronized sender callback failed! {:?}", data)
+                    }
+                };
+
+                let _sent_size = match command_socket.send(frame.serialize().as_ref())
                     .await.err_reason("While sending command") {
                     Ok(size) => size,
                     Err(err) => {
-                        match callback.send(Err(err)) {
-                            Err(data) => error!("Synchronized sender callback failed! {:?}", data),
-                            _ => {}
-                        }
+                        callback(Err(err));
                         continue;
                     }
                 };
-                // info!("Sent {} bytes of command", sent_size);
+                // info!("Sent {} bytes of command", _sent_size);
+
                 let recv_size = match command_socket.recv(&mut buf).await.err_reason("While receiving command") {
                     Ok(size) => size,
                     Err(err) => {
-                        match callback.send(Err(err)) {
-                            Err(data) => error!("Synchronized sender callback failed! {:?}", data),
-                            _ => {}
-                        }
+                        callback(Err(err));
                         continue;
                     }
                 };
-                // info!("Received {} bytes of acknowledge", recv_size);
-                // let frame = match ControlFrame::parse(&buf[..recv_size]).map_err(ParseError) {
-                //     Ok(frame) => frame,
-                //     Err(err) => {
-                //         match callback.send(Err(err)) {
-                //             Err(data) => error!("Synchronized sender callback failed! {:?}", data),
-                //             _ => {}
-                //         }
-                //         continue;
-                //     }
-                // };
-                // let ack = match frame.data {
-                //     CmdFrame(_) => {
-                //         match callback.send(Err(BadResponse(frame.data))) {
-                //             Err(data) => error!("Synchronized sender callback failed! {:?}", data),
-                //             _ => {}
-                //         }
-                //         continue;
-                //     }
-                //     AckMsgFrame(ack) => ack,
-                // };
                 let ack = match ControlFrame::parse(&buf[..recv_size]).map_err(ParseError) {
                     Ok(ControlFrame { data: AckMsgFrame(ack), .. }) => ack,
                     Ok(ControlFrame { data: CmdFrame(_), .. }) => {
-                        match callback.send(Err(BadResponse(frame.data))) {
-                            Err(data) => error!("Synchronized sender callback failed! {:?}", data),
-                            _ => {}
-                        }
+                        callback(Err(BadResponse(frame.data)));
                         continue;
                     }
                     Err(err) => {
-                        match callback.send(Err(err)) {
-                            Err(data) => error!("Synchronized sender callback failed! {:?}", data),
-                            _ => {}
-                        }
+                        callback(Err(err));
                         continue;
                     }
                 };
-                callback.send(Ok(ack)).expect("Callback should be safe");
+                callback(Ok(ack));
             }
             warn!("Task thread exited");
         }.instrument(info_span!("command synchronized sender")))
