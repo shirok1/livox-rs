@@ -89,6 +89,7 @@ pub mod response {
     use deku::prelude::*;
     use crate::model::traits::Response;
     use livox_rs_proc::Response;
+    use crate::ResponseData;
 
     #[derive(Debug, PartialEq, Eq, DekuRead, DekuWrite)]
     #[deku(type = "u8")]
@@ -113,60 +114,93 @@ pub mod response {
         RebootDevice(RebootDevice),
     }
 
+    impl TryFrom<ResponseData> for Enum {
+        type Error = ResponseData;
+
+        fn try_from(value: ResponseData) -> Result<Self, Self::Error> {
+            match value {
+                ResponseData::General(value) => Ok(value),
+                _ => Err(value)
+            }
+        }
+    }
+
     #[derive(Debug, PartialEq, Eq, DekuRead, DekuWrite, Response)]
     #[deku(endian = "little")]
     pub struct Handshake {
         pub(crate) ret_code: u8,
     }
 
+    // impl TryFrom<Enum> for Handshake {
+    //     type Error = ();
+    //
+    //     fn try_from(value: Enum) -> Result<Self, Self::Error> {
+    //         match value {
+    //             Enum::Handshake(value) => Ok(value),
+    //             _ => Err(())
+    //         }
+    //     }
+    // }
+    //
+    // impl TryFrom<ResponseData> for Handshake {
+    //     type Error = ();
+    //
+    //     fn try_from(value: ResponseData) -> Result<Self, Self::Error> {
+    //         match value.try_into() {
+    //             Ok(Enum::Handshake(value)) => Ok(value),
+    //             _ => Err(())
+    //         }
+    //     }
+    // }
+
     #[derive(Debug, PartialEq, Eq, DekuRead, DekuWrite, Response)]
     #[deku(endian = "little")]
     pub struct QueryDeviceInformation {
-        ret_code: u8,
-        version: [u8; 4],
+        pub(crate) ret_code: u8,
+        pub(crate) version: [u8; 4],
     }
 
     #[derive(Debug, PartialEq, Eq, DekuRead, DekuWrite, Response)]
     #[deku(endian = "little")]
     pub struct Heartbeat {
-        ret_code: u8,
-        work_state: u8,
-        feature_msg: u8,
-        ack_msg: u32,
+        pub(crate) ret_code: u8,
+        pub(crate) work_state: u8,
+        pub(crate) feature_msg: u8,
+        pub(crate) ack_msg: u32,
     }
 
     #[derive(Debug, PartialEq, Eq, DekuRead, DekuWrite, Response)]
     #[deku(endian = "little")]
     pub struct StartStopSampling {
-        ret_code: u8,
+        pub(crate) ret_code: u8,
     }
 
     #[derive(Debug, PartialEq, Eq, DekuRead, DekuWrite, Response)]
     #[deku(endian = "little")]
     pub struct ChangeCoordinateSystem {
-        ret_code: u8,
+        pub(crate) ret_code: u8,
     }
 
     #[derive(Debug, PartialEq, Eq, DekuRead, DekuWrite, Response)]
     #[deku(endian = "little")]
     pub struct Disconnect {
-        ret_code: u8,
+        pub(crate) ret_code: u8,
     }
 
     #[derive(Debug, PartialEq, Eq, DekuRead, DekuWrite, Response)]
     #[deku(endian = "little")]
     pub struct ConfigureStaticDynamicIP {
-        ret_code: u8,
+        pub(crate) ret_code: u8,
     }
 
     #[derive(Debug, PartialEq, Eq, DekuRead, DekuWrite, Response)]
     #[deku(endian = "little")]
     pub struct GetDeviceIPInformation {
-        ret_code: u8,
-        ip_mode: u8,
-        ip_addr: [u8; 4],
-        net_mask: [u8; 4],
-        gw_addr: [u8; 4],
+        pub(crate) ret_code: u8,
+        pub(crate) ip_mode: u8,
+        pub(crate) ip_addr: [u8; 4],
+        pub(crate) net_mask: [u8; 4],
+        pub(crate) gw_addr: [u8; 4],
     }
 
     #[derive(Debug, PartialEq, Eq, DekuRead, DekuWrite, Response)]
@@ -218,9 +252,9 @@ mod test {
                                  0x34, 0x12,
                                  0x78, 0x56,
                                  0x12, 0x90];
-        let (_rest, val) = Data::<Request>::from_bytes((data.as_ref(), 0)).unwrap();
+        let (_rest, val) = RequestData::from_bytes((data.as_ref(), 0)).unwrap();
 
-        assert_eq!(Data::<Request>::General(Enum::Handshake(Handshake {
+        assert_eq!(RequestData::General(Enum::Handshake(Handshake {
             user_ip: [127, 0, 0, 1],
             data_port: 0x1234,
             cmd_port: 0x5678,
@@ -235,9 +269,9 @@ mod test {
     fn test_response() {
         use super::response::*;
         let data: Vec<u8> = vec![0x00, 0x01, 0x01];
-        let (_rest, val) = Data::<Response>::from_bytes((data.as_ref(), 0)).unwrap();
+        let (_rest, val) = ResponseData::from_bytes((data.as_ref(), 0)).unwrap();
 
-        assert_eq!(Data::<Response>::General(Enum::Handshake(Handshake {
+        assert_eq!(ResponseData::General(Enum::Handshake(Handshake {
             ret_code: 0x01
         })), val);
 
@@ -252,9 +286,9 @@ mod test {
                                  0, 1, 2, 3, 4, 5, 6, 7, 8,
                                  9, 10, 11, 12, 13, 14, 15,
                                  6, 0, 0];
-        let (_rest, val) = Data::<Message>::from_bytes((data.as_ref(), 0)).unwrap();
+        let (_rest, val) = MessageData::from_bytes((data.as_ref(), 0)).unwrap();
 
-        assert_eq!(Data::<Message>::General(Enum::BroadcastMessage(BroadcastMessage {
+        assert_eq!(MessageData::General(Enum::BroadcastMessage(BroadcastMessage {
             broadcast_code: [0, 1, 2, 3, 4, 5, 6, 7, 8,
                 9, 10, 11, 12, 13, 14, 15, ],
             dev_type: 6,

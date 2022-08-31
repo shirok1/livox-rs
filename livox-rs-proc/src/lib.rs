@@ -163,16 +163,22 @@ pub fn generate_full(input: TokenStream) -> TokenStream {
 pub fn derive_request_fn(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
     let name = ast.ident.to_token_stream();
-    // let respoonse_name = format_ident!("{}Response", &ast.ident);
-    // let vis = ast.vis.to_token_stream();
-    // ast.da
     (quote! {
-        // impl Request for #name {
-        //     type Response = #respoonse_name
-        // }
-        // impl Response for #respoonse_name {}
-        // #vis struct #respoonse_name
-        impl Request for #name { type Response = super::response::#name; }
+        impl Request for #name {
+            type Response = super::response::#name;
+        }
+
+        impl From<#name> for Enum {
+            fn from(value: #name) -> Self {
+                Enum::#name(value)
+            }
+        }
+
+        impl From<#name> for super::super::RequestData {
+            fn from(value: #name) -> Self {
+                Enum::#name(value).into()
+            }
+        }
     }).into()
 }
 #[proc_macro_derive(Response)]
@@ -180,12 +186,46 @@ pub fn derive_response_fn(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
     let name = ast.ident.to_token_stream();
 
-    // ast.da
     (quote! {
-        // #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
-        // #[deku(endian = "little")]
-        // #ast
-        impl Response for #name {}
+        impl Response for #name {
+            type Enum = Enum;
+        }
+
+        impl From<#name> for Enum {
+            fn from(value: #name) -> Self {
+                Enum::#name(value)
+            }
+        }
+
+        impl From<#name> for super::super::ResponseData {
+            fn from(value: #name) -> Self {
+                Enum::#name(value).into()
+            }
+        }
+
+        impl TryFrom<Enum> for #name {
+            type Error = Enum;
+
+            fn try_from(value: Enum) -> Result<Self, Self::Error> {
+                match value {
+                    Enum::#name(value) => Ok(value),
+                    _ => Err(value)
+                }
+            }
+        }
+
+        impl TryFrom<ResponseData> for #name {
+            type Error = crate::model::ExtractError<Enum>;
+
+            fn try_from(value: ResponseData) -> Result<Self, Self::Error> {
+                match value.try_into() {
+                    Ok(Enum::#name(value)) => Ok(value),
+                    Ok(e) => Err(crate::model::ExtractError::WrongCommand(e)),
+                    Err(data) => Err(crate::model::ExtractError::WrongCommandSet(data))
+                }
+            }
+        }
+
     }).into()
 }
 #[proc_macro_derive(Message)]
@@ -194,5 +234,17 @@ pub fn derive_message_fn(input: TokenStream) -> TokenStream {
     let name = ast.ident.to_token_stream();
     (quote! {
         impl Message for #name {}
+
+        impl From<#name> for Enum {
+            fn from(value: #name) -> Self {
+                Enum::#name(value)
+            }
+        }
+
+        impl From<#name> for super::super::MessageData {
+            fn from(value: #name) -> Self {
+                Enum::#name(value).into()
+            }
+        }
     }).into()
 }

@@ -13,9 +13,8 @@ use tokio::time::interval;
 use tracing::{error, info, info_span, instrument, Instrument, warn};
 
 use crate::LivoxError::{BadResponse, ParseError};
-use crate::model::{Acknowledge, Command, ControlFrame, FrameData};
-use crate::model::data_type::*;
-use crate::model::FrameData::{AckMsgFrame, CmdFrame};
+use crate::model::{ControlFrame, FrameData};
+use crate::model::deku_data_type::{ExtractError, general, MessageData, RequestData, ResponseData};
 use crate::result_util::ToLivoxResult;
 
 
@@ -53,8 +52,8 @@ pub enum LivoxError {
     ParseError(model::ParseError),
     NoneBroadcastReceived,
     HandshakeFailed(Livox),
-    AckFailed(Acknowledge),
-    AckWrong(Acknowledge),
+    AckFailed(u8),
+    AckWrong(ResponseData),
     BadResponse(FrameData),
     AsyncChannelError(&'static str, mpsc::error::SendError<AsyncCommandTask>),
     AsyncCallbackError(&'static str, oneshot::error::RecvError),
@@ -79,8 +78,24 @@ mod result_util;
 /// A asynchronous Livox command task.
 #[derive(Debug)]
 pub struct AsyncCommandTask {
-    command: Command,
-    callback: oneshot::Sender<LivoxResult<Acknowledge>>,
+    command: RequestData,
+    callback: oneshot::Sender<LivoxResult<ResponseData>>,
+}
+
+pub struct HandshakeOption {
+    user_ip: Ipv4Addr,
+    cmd_port: u16,
+    data_port: u16,
+}
+
+impl Default for HandshakeOption {
+    fn default() -> Self {
+        HandshakeOption {
+            user_ip: Ipv4Addr::new(192, 168, 1, 50),
+            cmd_port: 0,
+            data_port: 0,
+        }
+    }
 }
 
 impl Livox {
@@ -106,11 +121,11 @@ impl Livox {
         let ControlFrame { data, .. } = ControlFrame::parse(&buf[..size]).map_err(ParseError)?;
 
         let (broadcast_code, dev_type) = {
-            if let AckMsgFrame(
-                Acknowledge::General(
-                    AckGeneral::BroadcastMessage {
-                        broadcast_code, dev_type, reserved: _
-                    })) = data {
+            if let FrameData::Message(MessageData::General(
+                                                 general::message::Enum::BroadcastMessage(
+                                                     general::message::BroadcastMessage {
+                                                         broadcast_code, dev_type, reserved: _
+                                                     }))) = data {
                 (broadcast_code, dev_type)
             } else { Err(NoneBroadcastReceived)? }
         };
@@ -138,26 +153,31 @@ impl Livox {
 
     /// Try to send handshake message to this Livox device.
     /// Returns a [`LivoxClient`] if handshake succeeded.
-    #[instrument(skip(self, user_ip, cmd_port, data_port), fields(lidar = % self.lidar_addr))]
-    pub async fn handshake(self, user_ip: Ipv4Addr, cmd_port: u16, data_port: u16) -> LivoxResult<LivoxClient> {
+    #[instrument(skip(self, option), fields(lidar = % self.lidar_addr))]
+    pub async fn handshake(self, option: HandshakeOption) -> LivoxResult<LivoxClient> {
         use LivoxError::*;
         let command_socket = UdpSocket::bind(
-            (Ipv4Addr::UNSPECIFIED, cmd_port))
+            (Ipv4Addr::UNSPECIFIED, option.cmd_port))
             .await.err_reason("While creating command socket")?;
+        let cmd_port = command_socket.local_addr().unwrap().port();
+        info!("Command port bind to {}", cmd_port);
+
         command_socket.connect(self.lidar_addr).await.err_reason("While connecting socket to LiDAR")?;
 
         let data_socket = UdpSocket::bind(
-            (Ipv4Addr::UNSPECIFIED, data_port)).await.err_reason("While creating data socket")?;
+            (Ipv4Addr::UNSPECIFIED, option.data_port)).await.err_reason("While creating data socket")?;
+        let data_port = data_socket.local_addr().unwrap().port();
+        info!("Data port bind to {}", data_port);
         // data_socket.connect(self.lidar_addr).await.err_reason("While connecting socket to LiDAR")?;
 
         let handshake = ControlFrame {
             version: 1,
-            data: CmdFrame(Command::General(CmdGeneral::Handshake {
-                user_ip: user_ip.octets(),
+            data: FrameData::Request(general::request::Handshake {
+                user_ip: option.user_ip.octets(),
                 data_port,
                 cmd_port,
                 imu_port: 0,
-            })),
+            }.into()),
             seq_num: 0,
         };
 
@@ -171,25 +191,28 @@ impl Livox {
 
         let handshake_ack = ControlFrame::parse(&buf[..size]).map_err(ParseError)?;
 
-        let (task_channel, task_receiver) = mpsc::channel::<AsyncCommandTask>(128);
+        if let FrameData::Response(response) = handshake_ack.data {
+            if let Ok(general::response::Handshake { ret_code: 0 }) = response.try_into() {
+                info!("Handshake OK");
 
-        let task_thread = LivoxClient::spawn_task_thread(command_socket, task_receiver);
+                let (task_channel, task_receiver) = mpsc::channel::<AsyncCommandTask>(128);
+                let task_thread = LivoxClient::spawn_task_thread(command_socket, task_receiver);
 
-        let (heartbeat_stop, heartbeat_rx) = oneshot::channel();
+                let (heartbeat_stop, heartbeat_rx) = oneshot::channel();
+                let heartbeat_thread = LivoxClient::spawn_heartbeat(task_channel.clone(), heartbeat_rx);
 
-        let heartbeat_thread = LivoxClient::spawn_heartbeat(task_channel.clone(), heartbeat_rx);
+                return Ok(LivoxClient {
+                    lidar: self,
+                    task_channel,
+                    task_thread,
+                    heartbeat_stop,
+                    heartbeat_thread,
+                    data_socket: Arc::new(data_socket),
+                });
+            }
+        }
 
-        if AckMsgFrame(Acknowledge::General(AckGeneral::Handshake { ret_code: 0 })) == handshake_ack.data {
-            info!("Handshake OK");
-            Ok(LivoxClient {
-                lidar: self,
-                task_channel,
-                task_thread,
-                heartbeat_stop,
-                heartbeat_thread,
-                data_socket: Arc::new(data_socket),
-            })
-        } else { Err(HandshakeFailed(self)) }
+        Err(HandshakeFailed(self))
     }
 }
 
@@ -209,9 +232,9 @@ pub struct LivoxClient {
 impl LivoxClient {
     const HEARTBEAT_PERIOD: Duration = Duration::from_millis(750);
 
-    async fn send_command_to_channel(channel: &mpsc::Sender<AsyncCommandTask>, command: Command) -> LivoxResult<Acknowledge> {
-        let (callback, task) = oneshot::channel::<LivoxResult<Acknowledge>>();
-        channel.send(AsyncCommandTask { command, callback }).await
+    async fn send_command_to_channel(channel: &mpsc::Sender<AsyncCommandTask>, command: impl Into<RequestData>) -> LivoxResult<ResponseData> {
+        let (callback, task) = oneshot::channel::<LivoxResult<ResponseData>>();
+        channel.send(AsyncCommandTask { command: command.into(), callback }).await
             .err_reason("While sending command")?;
         task.await.err_reason("While waiting for command response")?
     }
@@ -224,11 +247,11 @@ impl LivoxClient {
                 seq_num += 1;
                 let frame = ControlFrame {
                     version: 1,
-                    data: CmdFrame(command),
+                    data: FrameData::Request(command),
                     seq_num,
                 };
 
-                let callback = |result: LivoxResult<Acknowledge>| {
+                let callback = |result: LivoxResult<ResponseData>| {
                     if let Err(data) = callback.send(result) {
                         error!("Synchronized sender callback failed! {:?}", data)
                     }
@@ -252,8 +275,8 @@ impl LivoxClient {
                     }
                 };
                 let ack = match ControlFrame::parse(&buf[..recv_size]).map_err(ParseError) {
-                    Ok(ControlFrame { data: AckMsgFrame(ack), .. }) => ack,
-                    Ok(ControlFrame { data: CmdFrame(_), .. }) => {
+                    Ok(ControlFrame { data: FrameData::Response(ack), .. }) => ack,
+                    Ok(ControlFrame { .. }) => {
                         callback(Err(BadResponse(frame.data)));
                         continue;
                     }
@@ -270,6 +293,8 @@ impl LivoxClient {
 
     // #[instrument]
     fn spawn_heartbeat(channel: mpsc::Sender<AsyncCommandTask>, stop_signal: oneshot::Receiver<()>) -> JoinHandle<()> {
+        use general::*;
+
         spawn(async move {
             let mut interval = interval(LivoxClient::HEARTBEAT_PERIOD);
             let start_time = interval.tick().await;
@@ -278,8 +303,8 @@ impl LivoxClient {
             loop {
                 select! {
                 _ = interval.tick() => {
-                    let ack = LivoxClient::send_command_to_channel(&channel, Command::General(CmdGeneral::Heartbeat {})).await.unwrap();
-                    if matches!(ack, Acknowledge::General(AckGeneral::Heartbeat { ret_code: 0, .. })) {
+                    let ack = LivoxClient::send_command_to_channel(&channel, request::Heartbeat{}).await.unwrap().try_into();
+                    if matches!(ack, Ok(response::Heartbeat { ret_code: 0,.. })) {
                         info!("Heartbeat OK @ {}ms", start_time.elapsed().as_millis());
                     } else {
                         error!("Heartbeat failed @ {}ms: {:?}", start_time.elapsed().as_millis(), ack);
@@ -293,7 +318,7 @@ impl LivoxClient {
 
     /// Send a command to the LiDAR.
     /// See [`CmdGeneral`] and [`CmdLiDAR`] for available commands.
-    pub async fn send_command(&self, command: Command) -> LivoxResult<Acknowledge> {
+    pub async fn send_command(&self, command: impl Into<RequestData>) -> LivoxResult<ResponseData> {
         Self::send_command_to_channel(&self.task_channel, command).await
     }
 
@@ -302,15 +327,19 @@ impl LivoxClient {
     #[instrument]
     pub async fn set_sampling(&self, start: bool) -> Result<(), LivoxError> {
         use LivoxError::*;
-        let command = Command::General(CmdGeneral::StartStopSampling {
+        use general::*;
+
+        let command = request::StartStopSampling {
             sample_ctrl: if start { 1 } else { 0 }
-        });
+        };
 
         let ack = self.send_command(command).await?;
-        match ack {
-            Acknowledge::General(AckGeneral::StartStopSampling { ret_code: 0 }) => Ok(()),
-            ack if matches!(ack, Acknowledge::General(AckGeneral::StartStopSampling { .. })) => Err(AckFailed(ack)),
-            any => Err(AckWrong(any)),
+        match ack.try_into() {
+            Ok(response::StartStopSampling { ret_code: 0 }) => Ok(()),
+            Ok(response::StartStopSampling { ret_code }) => Err(AckFailed(ret_code)),
+            // ack if matches!(ack, Acknowledge::General(AckGeneral::StartStopSampling { .. })) => Err(AckFailed(ack)),
+            Err(ExtractError::WrongCommand(c)) => Err(AckWrong(c.into())),
+            Err(ExtractError::WrongCommandSet(any)) => Err(AckWrong(any)),
         }
     }
 

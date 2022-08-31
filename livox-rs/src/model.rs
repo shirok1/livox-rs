@@ -3,12 +3,15 @@ use std::fmt::{Debug, Display, Formatter};
 use byte_struct::*;
 use bytes::{Buf, BufMut, BytesMut};
 use crc::{Algorithm, Crc};
+use deku::DekuContainerRead;
 use nalgebra::{Point3, SMatrix, Vector4};
 
 use tracing::{debug, warn};
 use crate::model::ParseError::{InvalidCommandType, InvalidCrc16, InvalidCrc32, InvalidData, InvalidLength, InvalidSOF, InvalidVersion, WrongPointCloudSize};
 
-use data_type::*;
+use deku_data_type::*;
+use data_type::{DT2, DT3, LiDARStatusCode};
+
 
 const HEADER_CHECKSUM_ALGORITHM: Algorithm<u16> = Algorithm { init: 0x4c49u16.reverse_bits(), ..crc::CRC_16_MCRF4XX };
 const FRAME_CHECKSUM_ALGORITHM: Algorithm<u32> = Algorithm { init: !0x564f580au32.reverse_bits(), ..crc::CRC_32_ISO_HDLC };
@@ -27,7 +30,7 @@ pub struct ControlFrame {
     pub seq_num: u16,
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Debug)]
 pub enum ParseError {
     InvalidSOF,
     InvalidVersion,
@@ -37,7 +40,10 @@ pub enum ParseError {
     InvalidCommandType,
     InvalidData,
     WrongPointCloudSize,
+    DekuError(DekuError),
 }
+
+use deku::prelude::*;
 
 impl Display for ParseError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -80,58 +86,34 @@ impl ControlFrame {
         Ok(ControlFrame {
             version: frame[1],
             data: match frame[4] {
-                0x00 /*CMD*/ => FrameData::CmdFrame(Command::parse(&frame[9..len - 4])?),
-                0x01 /*ACK*/ => FrameData::AckMsgFrame(Acknowledge::parse(&frame[9..len - 4])?),
-                0x02 /*MSG*/ => FrameData::AckMsgFrame(Acknowledge::parse(&frame[9..len - 4])?),
-                _ => Err(InvalidCommandType)?
-            },
+                0x00 /*CMD*/ => RequestData::parse(&frame[9..len - 4]).map(Into::into),
+                0x01 /*ACK*/ => ResponseData::parse(&frame[9..len - 4]).map(Into::into),
+                0x02 /*MSG*/ => MessageData::parse(&frame[9..len - 4]).map(Into::into),
+                _ => return Err(InvalidCommandType)
+            }.map_err(ParseError::DekuError)?,
             seq_num: u16::from_le_bytes([frame[5], frame[6]]),
         })
     }
     pub fn serialize(&self) -> BytesMut {
-        let data: Box<[u8]> = match &self.data {
-            FrameData::CmdFrame(Command::General(cmd_general)) => {
-                let mut dataframe = Box::new([0u8; CmdGeneral::MAX_BYTE_LEN]);
-                cmd_general.write_bytes(dataframe.as_mut_slice());
-                dataframe
-            }
-            FrameData::CmdFrame(Command::LiDAR(cmd_lidar)) => {
-                let mut dataframe = Box::new([0u8; CmdLiDAR::MAX_BYTE_LEN]);
-                cmd_lidar.write_bytes(dataframe.as_mut_slice());
-                dataframe
-            }
-            FrameData::AckMsgFrame(Acknowledge::General(ack_general)) => {
-                let mut dataframe = Box::new([0u8; AckGeneral::MAX_BYTE_LEN]);
-                ack_general.write_bytes(dataframe.as_mut_slice());
-                dataframe
-            }
-            FrameData::AckMsgFrame(Acknowledge::LiDAR(ack_lidar)) => {
-                let mut dataframe = Box::new([0u8; AckLiDAR::MAX_BYTE_LEN]);
-                ack_lidar.write_bytes(dataframe.as_mut_slice());
-                dataframe
-            }
-            FrameData::AckMsgFrame(Acknowledge::Hub()) | FrameData::CmdFrame(Command::Hub()) => todo!("no hub")
-        };
+        let data = match &self.data {
+            FrameData::Request(data) => data.to_bytes(),
+            FrameData::Response(data) => data.to_bytes(),
+            FrameData::Message(data) => data.to_bytes()
+        }.map_err(ParseError::DekuError).unwrap();
 
 
-        let mut frame = BytesMut::with_capacity(data.len() + 14);
+        let mut frame = BytesMut::with_capacity(data.len() + 13);
 
         frame.put_u8(ControlFrame::SOF);
         frame.put_u8(self.version);
-        frame.put_u16_le(data.len() as u16 + 14);
+        frame.put_u16_le(data.len() as u16 + 13);
         frame.put_u8(match &self.data {
-            FrameData::CmdFrame(_) => 0x00,
-            FrameData::AckMsgFrame(_) => 0x01
+            FrameData::Request(_) => 0x00,
+            FrameData::Response(_) => 0x01,
+            FrameData::Message(_) => 0x02
         });
         frame.put_u16_le(self.seq_num);
         frame.put_u16_le(CRC16.checksum(&frame[..frame.remaining()]));
-        frame.put_u8(
-            match &self.data {
-                FrameData::CmdFrame(Command::General(_)) | FrameData::AckMsgFrame(Acknowledge::General(_)) => 0x00,
-                _ => 0x01,
-                /*hub*/
-            }
-        );
         frame.put(&data[..]);
         frame.put_u32_le(CRC32.checksum(&frame[..frame.remaining()]));
         frame
@@ -140,50 +122,32 @@ impl ControlFrame {
 
 #[derive(PartialEq, Debug)]
 pub enum FrameData {
-    CmdFrame(Command),
-    AckMsgFrame(Acknowledge),
-    // MSG,
+    Request(RequestData),
+    Response(ResponseData),
+    Message(MessageData),
+}
+
+impl From<RequestData> for FrameData {
+    fn from(value: RequestData) -> Self {
+        FrameData::Request(value)
+    }
+}
+
+impl From<ResponseData> for FrameData {
+    fn from(value: ResponseData) -> Self {
+        FrameData::Response(value)
+    }
+}
+
+impl From<MessageData> for FrameData {
+    fn from(value: MessageData) -> Self {
+        FrameData::Message(value)
+    }
 }
 
 pub mod data_type;
 mod traits;
-mod deku_data_type;
-
-#[derive(PartialEq, Debug)]
-pub enum Command {
-    General(CmdGeneral),
-    LiDAR(CmdLiDAR),
-    Hub(),
-}
-
-impl Command {
-    pub fn parse(data: &[u8]) -> Result<Command, ParseError> {
-        match data[0] {
-            0x00 => Ok(Command::General(CmdGeneral::read_bytes(&data[1..]))),
-            0x01 => Ok(Command::LiDAR(CmdLiDAR::read_bytes(&data[1..]))),
-            0x02 => Ok(Command::Hub()),
-            _ => Err(InvalidCommandType),
-        }
-    }
-}
-
-#[derive(PartialEq, Debug)]
-pub enum Acknowledge {
-    General(AckGeneral),
-    LiDAR(AckLiDAR),
-    Hub(),
-}
-
-impl Acknowledge {
-    pub fn parse(data: &[u8]) -> Result<Acknowledge, ParseError> {
-        match data[0] {
-            0x00 => Ok(Acknowledge::General(AckGeneral::read_bytes(&data[1..]))),
-            0x01 => Ok(Acknowledge::LiDAR(AckLiDAR::read_bytes(&data[1..]))),
-            0x02 => Ok(Acknowledge::Hub()),
-            _ => Err(InvalidCommandType),
-        }
-    }
-}
+pub(crate) mod deku_data_type;
 
 #[derive(PartialEq, Debug)]
 pub struct PointCloudFrame {

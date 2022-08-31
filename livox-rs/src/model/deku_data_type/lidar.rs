@@ -70,7 +70,7 @@ pub mod request {
     #[derive(Debug, PartialEq, Eq, DekuRead, DekuWrite, Request)]
     #[deku(endian = "little")]
     pub struct SetLiDARReturnMode {
-        mode: u8,
+        pub(crate) mode: u8,
     }
 
     #[derive(Debug, PartialEq, Eq, DekuRead, DekuWrite, Request)]
@@ -102,6 +102,7 @@ pub mod response {
     use deku::prelude::*;
     use livox_rs_proc::Response;
     use crate::model::traits::Response;
+    use crate::ResponseData;
 
     #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
     #[deku(type = "u8")]
@@ -128,6 +129,17 @@ pub mod response {
         GetIMUDataPushFrequency(GetIMUDataPushFrequency),
         #[deku(id = "0x0A")]
         UpdateUTCSynchronizeTime(UpdateUTCSynchronizeTime),
+    }
+
+    impl TryFrom<ResponseData> for Enum {
+        type Error = ResponseData;
+
+        fn try_from(value: ResponseData) -> Result<Self, Self::Error> {
+            match value {
+                ResponseData::LiDAR(value) => Ok(value),
+                _ => Err(value)
+            }
+        }
     }
 
     #[derive(Debug, PartialEq, Eq, DekuRead, DekuWrite, Response)]
@@ -222,9 +234,9 @@ mod test {
     fn test_request() {
         use super::request::*;
         let data: Vec<u8> = vec![0x01, 0x00, 0x01];
-        let (_rest, val) = Data::<Request>::from_bytes((data.as_ref(), 0)).unwrap();
+        let (_rest, val) = RequestData::from_bytes((data.as_ref(), 0)).unwrap();
 
-        assert_eq!(Data::<Request>::LiDAR(Enum::SetMode(SetMode {
+        assert_eq!(RequestData::LiDAR(Enum::SetMode(SetMode {
             lidar_mode: 0x01
         })), val);
 
@@ -236,9 +248,9 @@ mod test {
     fn test_response() {
         use super::response::*;
         let data: Vec<u8> = vec![0x01, 0x00, 0x00];
-        let (_rest, val) = Data::<Response>::from_bytes((data.as_ref(), 0)).unwrap();
+        let (_rest, val) = ResponseData::from_bytes((data.as_ref(), 0)).unwrap();
 
-        assert_eq!(Data::<Response>::LiDAR(Enum::SetMode(SetMode {
+        assert_eq!(ResponseData::LiDAR(Enum::SetMode(SetMode {
             ret_code: 0x00
         })), val);
 

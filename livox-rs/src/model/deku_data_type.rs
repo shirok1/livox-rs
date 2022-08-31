@@ -1,47 +1,76 @@
-mod general;
-
-mod lidar;
-
 use deku::prelude::*;
+use crate::model::traits::{Request, Response};
 
-pub trait CmdType<'a>/*: Eq*/ {
-    type General: DekuRead<'a> + DekuWrite;
-    type LiDAR: DekuRead<'a> + DekuWrite;
-    // type Hub: DekuRead<'a> + DekuWrite;
+pub mod general;
+pub mod lidar;
+
+pub trait Parsable<'a>: Sized + DekuContainerRead<'a> + DekuWrite {
+    fn parse(input: &'a [u8]) -> Result<Self, DekuError> {
+        let ((_rest, rest_size), val) =
+            Self::from_bytes((input, 0))?;
+        if rest_size != 0 { tracing::warn!("Some data left not handled by deku!"); }
+        Ok(val)
+    }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct Request;
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct Response;
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct Message;
-
-impl CmdType<'_> for Request {
-    type General = general::request::Enum;
-    type LiDAR = lidar::request::Enum;
-    // type Hub = ();
-}
-
-
-impl CmdType<'_> for Response {
-    type General = general::response::Enum;
-    type LiDAR = lidar::response::Enum;
-    // type Hub = ();
-}
-
-impl CmdType<'_> for Message {
-    type General = general::message::Enum;
-    type LiDAR = lidar::message::Enum;
-    // type Hub = ();
-}
-
-#[derive(Debug, PartialEq, Eq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
 #[deku(type = "u8")]
-enum Data<'a, DT: CmdType<'a>> {
-    #[deku(id = "0x00")] General(DT::General),
-    #[deku(id = "0x01")] LiDAR(DT::LiDAR),
-    // #[deku(id = "0x02")] Hub(DT::Hub),
+pub enum RequestData {
+    #[deku(id = "0x00")] General(general::request::Enum),
+    #[deku(id = "0x01")] LiDAR(lidar::request::Enum),
+}
+
+impl From<general::request::Enum> for RequestData {
+    fn from(value: general::request::Enum) -> Self {
+        Self::General(value)
+    }
+}
+
+impl From<lidar::request::Enum> for RequestData {
+    fn from(value: lidar::request::Enum) -> Self {
+        Self::LiDAR(value)
+    }
+}
+
+impl Parsable<'_> for RequestData {}
+
+#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[deku(type = "u8")]
+pub enum ResponseData {
+    #[deku(id = "0x00")] General(general::response::Enum),
+    #[deku(id = "0x01")] LiDAR(lidar::response::Enum),
+}
+
+impl Parsable<'_> for ResponseData {}
+
+impl From<general::response::Enum> for ResponseData {
+    fn from(value: general::response::Enum) -> Self {
+        Self::General(value)
+    }
+}
+
+impl From<lidar::response::Enum> for ResponseData {
+    fn from(value: lidar::response::Enum) -> Self {
+        Self::LiDAR(value)
+    }
+}
+
+#[derive(Debug)]
+pub enum ExtractError<T> {
+    WrongCommandSet(ResponseData),
+    WrongCommand(T),
+}
+
+#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[deku(type = "u8")]
+pub enum MessageData {
+    #[deku(id = "0x00")] General(general::message::Enum),
+}
+
+impl Parsable<'_> for MessageData {}
+
+impl From<general::message::Enum> for MessageData {
+    fn from(value: general::message::Enum) -> Self {
+        Self::General(value)
+    }
 }

@@ -14,11 +14,11 @@ use rdr_zeromq::prelude::{Message, Timestamp};
 use rdr_zeromq::prelude::lidar::{DepthPixel, LiDARDepthPixels, LiDARRawPoints, RawPoint};
 use rdr_zeromq::server::{EncodedImgServer, LiDARServer};
 use rdr_zeromq::traits::Server;
-use livox_rs::Livox;
+use livox_rs::{HandshakeOption, Livox};
 
 
-const COMMAND_SOCKET_PORT: u16 = 1157;
-const DATA_LISTEN_PORT: u16 = 7731;
+const COMMAND_SOCKET_PORT: u16 = 0;
+const DATA_LISTEN_PORT: u16 = 0;
 
 const DEPTH_GRAPH_SERVER_ENDPOINT: &str = "tcp://0.0.0.0:8100";
 const DEPTH_PIXELS_SERVER_ENDPOINT: &str = "tcp://0.0.0.0:8200";
@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let subscriber = tracing_subscriber::FmtSubscriber::new();
     tracing::subscriber::set_global_default(subscriber)?;
     let client = Livox::wait_for_one().await?
-        .handshake(Ipv4Addr::new(192, 168, 1, 50), COMMAND_SOCKET_PORT, DATA_LISTEN_PORT).await?;
+        .handshake(HandshakeOption::default()).await?;
     client.set_sampling(true).await?;
 
     let calib_mat = calculate_calib_mat();
