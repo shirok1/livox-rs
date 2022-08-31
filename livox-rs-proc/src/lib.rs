@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, ToTokens};
 use quote::__private::TokenStream as Quote;
-use syn::{braced, FieldsNamed, Ident, parse_macro_input, Token};
+use syn::{braced, FieldsNamed, Ident, parse_macro_input, Token, DeriveInput};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 
@@ -156,5 +156,43 @@ pub fn generate_full(input: TokenStream) -> TokenStream {
         // impl ByteStructLen for #name {
         //     const BYTE_LEN: usize = #(<#ty0>::BYTE_LEN)+*;
         // }
+    }).into()
+}
+
+#[proc_macro_derive(Request)]
+pub fn derive_request_fn(input: TokenStream) -> TokenStream {
+    let ast = parse_macro_input!(input as DeriveInput);
+    let name = ast.ident.to_token_stream();
+    // let respoonse_name = format_ident!("{}Response", &ast.ident);
+    // let vis = ast.vis.to_token_stream();
+    // ast.da
+    (quote! {
+        // impl Request for #name {
+        //     type Response = #respoonse_name
+        // }
+        // impl Response for #respoonse_name {}
+        // #vis struct #respoonse_name
+        impl Request for #name { type Response = super::response::#name; }
+    }).into()
+}
+#[proc_macro_derive(Response)]
+pub fn derive_response_fn(input: TokenStream) -> TokenStream {
+    let ast = parse_macro_input!(input as DeriveInput);
+    let name = ast.ident.to_token_stream();
+
+    // ast.da
+    (quote! {
+        // #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+        // #[deku(endian = "little")]
+        // #ast
+        impl Response for #name {}
+    }).into()
+}
+#[proc_macro_derive(Message)]
+pub fn derive_message_fn(input: TokenStream) -> TokenStream {
+    let ast = parse_macro_input!(input as DeriveInput);
+    let name = ast.ident.to_token_stream();
+    (quote! {
+        impl Message for #name {}
     }).into()
 }

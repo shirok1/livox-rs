@@ -146,6 +146,8 @@ pub enum FrameData {
 }
 
 pub mod data_type;
+mod traits;
+mod deku_data_type;
 
 #[derive(PartialEq, Debug)]
 pub enum Command {
